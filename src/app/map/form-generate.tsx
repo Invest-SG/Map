@@ -224,20 +224,52 @@ export default function FormGenerate<
             control={form.control}
             name={key}
             render={({ field }) => {
-              const earliest =
+              // Helpers
+              const floorDate = (d: Date) =>
+                new Date(d.getFullYear(), d.getMonth(), d.getDate());
+              const ceilDate = (d: Date) =>
+                new Date(
+                  d.getFullYear(),
+                  d.getMonth(),
+                  d.getDate(),
+                  23,
+                  59,
+                  59,
+                  999,
+                );
+              const clamp = (d: Date, lo: Date, hi: Date) =>
+                new Date(
+                  Math.min(Math.max(d.getTime(), lo.getTime()), hi.getTime()),
+                );
+              const fmt = (d: Date) =>
+                d.toLocaleDateString("en-GB", {
+                  day: "numeric",
+                  month: "short",
+                  year: "2-digit",
+                });
+
+              // Bounds from defaults
+              const defaultsObj =
                 defaults[key] &&
                 typeof defaults[key] === "object" &&
                 !Array.isArray(defaults[key])
-                  ? defaults[key].from
-                  : new Date();
-              const latest =
-                defaults[key] &&
-                typeof defaults[key] === "object" &&
-                !Array.isArray(defaults[key])
-                  ? defaults[key].to
-                  : new Date();
-              return typeof field.value === "object" &&
-                !Array.isArray(field.value) ? (
+                  ? (defaults[key] as { from: Date; to: Date })
+                  : { from: new Date(), to: new Date() };
+
+              const minDay = floorDate(defaultsObj.from);
+              const maxDay = ceilDate(defaultsObj.to);
+
+              // Always derive a usable "current" value (avoid returning null)
+              const raw = field.value as unknown;
+              const current: { from: Date; to: Date } =
+                raw &&
+                typeof raw === "object" &&
+                !Array.isArray(raw) &&
+                (raw as any).from &&
+                (raw as any).to
+                  ? (raw as { from: Date; to: Date })
+                  : { from: minDay, to: maxDay };
+              return (
                 <FormItem>
                   <FormLabel className="text-neutral-50">
                     {filter.name}
@@ -246,80 +278,85 @@ export default function FormGenerate<
                     <Popover>
                       <PopoverTrigger asChild>
                         <button
-                          className={
-                            "flex h-10 w-full items-center gap-2 rounded-full bg-neutral-800 px-4 py-2 text-sm font-normal data-[state=open]:bg-neutral-950 [&_svg]:size-5"
-                          }
+                          type="button"
+                          className="flex h-10 w-full items-center gap-2 rounded-full bg-neutral-800 px-4 py-2 text-sm font-normal data-[state=open]:bg-neutral-950 [&_svg]:size-5"
                         >
                           <CalendarDays className="shrink-0 text-neutral-400" />
                           <div className="w-full text-left text-neutral-50">
-                            {field.value.from.toLocaleDateString("en-GB", {
-                              day: "numeric",
-                              month: "short",
-                              year: "2-digit",
-                            })}
+                            {fmt(current.from)}
                           </div>
                           <Separator orientation="vertical" className="mx-1" />
                           <div className="w-full text-left text-neutral-50">
-                            {field.value.to.toLocaleDateString("en-GB", {
-                              day: "numeric",
-                              month: "short",
-                              year: "2-digit",
-                            })}
+                            {fmt(current.to)}
                           </div>
                         </button>
                       </PopoverTrigger>
                       <PopoverContent className="w-auto border-0 p-0">
-                        <Calendar
-                          captionLayout="dropdown"
-                          disabled={{
-                            before: earliest,
-                            after: latest,
-                          }}
-                          startMonth={earliest}
-                          endMonth={latest}
-                          mode="range"
-                          required
-                          selected={field.value}
-                          onSelect={(range) => {
-                            const current = field.value as {
-                              from: Date;
-                              to: Date;
-                            };
-                            if (!range) return;
-                            if (
-                              current.from.getTime() === current.to.getTime()
-                            ) {
-                              return field.onChange(range);
-                            }
-                            // Only to changes, set to as start date
-                            if (
-                              range.from?.getTime() === current.from.getTime()
-                            )
-                              return field.onChange({
-                                from: range.to,
-                                to: range.to,
+                        <div className="p-2">
+                          <Calendar
+                            captionLayout="dropdown"
+                            disabled={{ before: minDay, after: maxDay }}
+                            startMonth={minDay}
+                            endMonth={maxDay}
+                            mode="range"
+                            required
+                            selected={current} // { from?: Date; to?: Date }
+                            onSelect={(range) => {
+                              if (!range) return;
+                              // Normalize: single click -> [day, day]; two clicks -> [from, to]
+                              const from =
+                                range.from ?? current.from ?? new Date();
+                              const to =
+                                range.to ?? range.from ?? current.to ?? from;
+
+                              field.onChange({
+                                from: clamp(from, minDay, maxDay),
+                                to: clamp(to, minDay, maxDay),
                               });
-                            // Otherwise
-                            return field.onChange({
-                              from: range.from,
-                              to: range.from,
-                            });
-                          }}
-                          autoFocus
-                          defaultMonth={field.value.from}
-                          numberOfMonths={isLarge ? 2 : 1}
-                        />
+                            }}
+                            autoFocus
+                            defaultMonth={current.from}
+                            numberOfMonths={isLarge ? 2 : 1}
+                          />
+
+                          <div className="mt-2 flex items-center justify-between px-1">
+                            <button
+                              type="button"
+                              className="text-xs text-neutral-300 underline"
+                              onClick={() =>
+                                field.onChange({
+                                  from: minDay,
+                                  to: maxDay,
+                                })
+                              }
+                            >
+                              Reset to full range
+                            </button>
+                            {/* Optional: quick 'Today' helper
+                    <button
+                      type="button"
+                      className="text-xs underline text-neutral-300"
+                      onClick={() => {
+                        const today = floorDate(new Date());
+                        const t = clamp(today, minDay, maxDay);
+                        field.onChange({ from: t, to: t });
+                      }}
+                    >
+                      Today
+                    </button>
+                    */}
+                          </div>
+                        </div>
                       </PopoverContent>
                     </Popover>
                   </FormControl>
                   <FormMessage />
                 </FormItem>
-              ) : (
-                <></>
               );
             }}
           />
         )}
+
         {filter.type === "search" && (
           <FormField
             key={key}
