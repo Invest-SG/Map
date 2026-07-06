@@ -27,6 +27,37 @@ const SOURCES_LAYERS: Record<
   crustThickness: ["crustThickness"],
 };
 
+// Accepted by maplibre-gl addImage
+type StyleImageLike = {
+  width: number;
+  height: number;
+  data: Uint8Array | Uint8ClampedArray;
+};
+type AcceptedImage =
+  | StyleImageLike
+  | ImageBitmap
+  | ImageData
+  | HTMLImageElement;
+
+type WrappedImage = {
+  data:
+    | StyleImageLike
+    | ImageBitmap
+    | ImageData
+    | HTMLCanvasElement
+    | HTMLImageElement;
+  pixelRatio?: number;
+  sdf?: boolean;
+};
+
+type GetImageReturn =
+  | StyleImageLike
+  | ImageBitmap
+  | ImageData
+  | HTMLCanvasElement
+  | HTMLImageElement
+  | WrappedImage;
+
 /** Zips and downloads the files */
 const downladFiles = async (images: { name: string; blob: Blob | null }[]) => {
   const blob = await downloadZip(
@@ -129,10 +160,8 @@ function findLayersForSources(m: maplibregl.Map | MapRef, sourceIds: string[]) {
   const style = m.getStyle();
   const ids: string[] = [];
   for (const lyr of style.layers ?? []) {
-    // @ts-ignore
-    const src = lyr.source as string | undefined;
-    if (!src) continue;
-    if (sourceIds.includes(src)) ids.push(lyr.id);
+    const src = (lyr as { source?: string }).source;
+    if (src && sourceIds.includes(src)) ids.push(lyr.id);
   }
   return ids;
 }
@@ -144,22 +173,75 @@ function filterVisibleLayers(m: maplibregl.Map | MapRef, layerIds: string[]) {
   );
 }
 
-/** Copy a runtime-added image from the live map -> offscreen map */
+// Narrow optional methods without `any`
+function asImageAPI(m: maplibregl.Map | MapRef): {
+  getImage?: (id: string) => GetImageReturn | undefined;
+  listImages?: () => string[];
+} {
+  return m as unknown as {
+    getImage?: (id: string) => GetImageReturn | undefined;
+    listImages?: () => string[];
+  };
+}
+
+function isWrappedImage(img: GetImageReturn): img is WrappedImage {
+  return typeof (img as WrappedImage).data !== "undefined" && !("width" in img);
+}
+
+function isCanvas(x: unknown): x is HTMLCanvasElement {
+  return (
+    typeof HTMLCanvasElement !== "undefined" && x instanceof HTMLCanvasElement
+  );
+}
+
+function toAcceptedImage(
+  input:
+    | StyleImageLike
+    | ImageBitmap
+    | ImageData
+    | HTMLCanvasElement
+    | HTMLImageElement,
+): AcceptedImage {
+  if (isCanvas(input)) {
+    const ctx = input.getContext("2d");
+    // If context is missing (very rare), fall back to a transparent 1x1
+    const imageData =
+      ctx?.getImageData(0, 0, input.width, input.height) ?? new ImageData(1, 1);
+    return imageData;
+  }
+  return input as AcceptedImage;
+}
+
 function copyImageById(
-  map: maplibregl.Map | MapRef,
-  newMap: maplibregl.Map,
+  srcMap: maplibregl.Map | MapRef,
+  dstMap: maplibregl.Map,
   id: string,
 ) {
-  // @ts-ignore
-  const img = map.getImage?.(id);
+  const api = asImageAPI(srcMap);
+  const img = api.getImage?.(id);
   if (!img) return;
-  // @ts-ignore
-  const data = img.data ?? img;
-  // @ts-ignore
-  const pixelRatio = img.pixelRatio ?? 1;
-  // @ts-ignore
-  const sdf = !!img.sdf;
-  if (!newMap.hasImage(id)) newMap.addImage(id, data, { pixelRatio, sdf });
+
+  let data:
+    | StyleImageLike
+    | ImageBitmap
+    | ImageData
+    | HTMLCanvasElement
+    | HTMLImageElement;
+  let pixelRatio = 1;
+  let sdf = false;
+
+  if (isWrappedImage(img)) {
+    data = img.data;
+    pixelRatio = img.pixelRatio ?? 1;
+    sdf = !!img.sdf;
+  } else {
+    data = img;
+  }
+
+  if (!dstMap.hasImage(id)) {
+    const normalized: AcceptedImage = toAcceptedImage(data);
+    dstMap.addImage(id, normalized, { pixelRatio, sdf });
+  }
 }
 
 const drawMapLabels = async (map: maplibregl.Map | MapRef) => {
@@ -301,13 +383,14 @@ const DownloadControl = ({ layerIds }: { layerIds: (string | string[])[] }) => {
       fadeDuration: 0,
       attributionControl: false,
     });
-    // Copy any runtime-added images (ensures volcano/seamount icons render on offscreen map)
-    newMap.on("styleimagemissing", (e: { id: string }) =>
-      copyImageById(map!, newMap, e.id),
-    );
-    // Eager copy all already-registered images
-    const existing = (map as any).listImages?.() ?? [];
-    existing.forEach((id: string) => copyImageById(map!, newMap, id));
+    // Serve missing sprites on demand (inline type to avoid unused import)
+    newMap.on("styleimagemissing", (e: { id: string }) => {
+      copyImageById(map!, newMap, e.id);
+    });
+
+    // Eagerly copy all existing images from the live map (no `any`)
+    const existing = asImageAPI(map!).listImages?.() ?? [];
+    existing.forEach((id) => copyImageById(map!, newMap, id));
 
     const imagePromises: Promise<{ name: string; blob: Blob | null }>[] = [];
     const layersToExport: (string | string[])[] = [];
@@ -378,7 +461,9 @@ const DownloadControl = ({ layerIds }: { layerIds: (string | string[])[] }) => {
           if (Array.isArray(layer)) {
             const group: string[] = []; //Technically if one layer is visible all are visible so this could just be a boolean, but who knows
             layer.forEach((layerPart) => {
-              if (newMap.getLayer(layerPart)?.visibility === "visible") {
+              if (
+                newMap.getLayoutProperty(layerPart, "visibility") !== "none"
+              ) {
                 group.push(layerPart);
                 newMap.setLayoutProperty(layerPart, "visibility", "none");
               }
@@ -387,7 +472,7 @@ const DownloadControl = ({ layerIds }: { layerIds: (string | string[])[] }) => {
             return;
           }
 
-          if (newMap.getLayer(layer)?.visibility === "visible") {
+          if (newMap.getLayoutProperty(layer, "visibility") !== "none") {
             layersToExport.push(layer);
             newMap.setLayoutProperty(layer, "visibility", "none");
           }

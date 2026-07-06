@@ -6,10 +6,17 @@ import {
 } from "@/components/ui/popover";
 import { ALL_FILTERS_CLIENT } from "@/lib/data-definitions";
 import { PopoverClose } from "@radix-ui/react-popover";
-import { useAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { CSSProperties, memo, useRef } from "react";
 import { HexColorPicker } from "react-colorful";
-import { colorsAtom } from "./atoms";
+import { colorsAtom, gnssModeAtom, gnssModeDraftAtom } from "./atoms";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 type ColorConfig<T extends Record<string, string | string[]> = {}> =
@@ -33,6 +40,23 @@ type ColorConfig<T extends Record<string, string | string[]> = {}> =
             : never;
       };
     };
+
+// local helper types to avoid `any`
+type SolidCfg = { type: "solid"; default: string; label: string };
+type GnssColors = { icon: string; vector: string };
+
+// This mirrors the color shapes you already use in `colorsAtom`
+type DataColorsShape = {
+  vlc: string;
+  smt: string;
+  gnss: GnssColors;
+  rock: string;
+  flt: string;
+  hf: string[];
+  seis: string[];
+  slab2: string[];
+  slip: string[];
+};
 
 /** Renders a solid colour picker. Only updates the colour on save */
 const SolidColorPicker = ({
@@ -98,6 +122,11 @@ const ColorControl = ({
   dataKey: keyof typeof ALL_FILTERS_CLIENT;
 }) => {
   const [dataColors, setDataColors] = useAtom(colorsAtom);
+
+  const committedMode = useAtomValue(gnssModeAtom);
+  const [modeDraft, setModeDraft] = useAtom(gnssModeDraftAtom);
+
+  const uiMode = modeDraft ?? committedMode;
 
   const colorConfig: Partial<{
     [P in keyof typeof dataColors]: (typeof dataColors)[P] extends Record<
@@ -214,34 +243,92 @@ const ColorControl = ({
     );
   }
   if (colorConfig[dataKey].type === "multi") {
-    return Object.entries(colorConfig[dataKey].pickers).map(
-      ([colorKey, config]) => {
-        if (config.type === "solid") {
-          return (
+    // explicitly narrow once and reuse
+    // const cfgMulti = colorConfig[dataKey] as Extract<
+    //   ColorConfig,
+    //   { type: "multi" }
+    // >;
+
+    // ---- GNSS ONLY: dropdown + render only the relevant pickers
+    if (dataKey === "gnss") {
+      // which pickers to show in the UI
+      const visibleKeys: ReadonlyArray<keyof GnssColors> =
+        uiMode === "points"
+          ? ["icon"]
+          : uiMode === "vectors"
+            ? ["vector"]
+            : ["icon", "vector"];
+
+      // typed views of your atoms/config (no `any`)
+      const gnssColors = (dataColors as unknown as DataColorsShape).gnss;
+      const gnssPickers = (
+        colorConfig.gnss as Extract<ColorConfig, { type: "multi" }>
+      ).pickers as Record<keyof GnssColors, SolidCfg>;
+
+      return (
+        <>
+          <div className="space-y-1">
+            <div className="my-3 text-sm">Display</div>
+            <Select value={uiMode} onValueChange={(v) => setModeDraft(v)}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="points">Points only</SelectItem>
+                <SelectItem value="vectors">Vectors only</SelectItem>
+                <SelectItem value="both">Both</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {visibleKeys.map((k) => (
             <SolidColorPicker
-              key={colorKey}
-              currentColor={
-                dataColors[dataKey][
-                  colorKey as keyof (typeof dataColors)[keyof typeof dataColors]
-                ]
-              }
-              buttonId={colorKey}
-              defaultColor={config.default}
-              label={config.label}
+              key={k}
+              currentColor={gnssColors[k]}
+              buttonId={k}
+              defaultColor={gnssPickers[k].default}
+              label={gnssPickers[k].label}
               onSave={(color) =>
-                setDataColors((prev) => ({
-                  ...prev,
-                  [dataKey]: {
-                    ...(prev[dataKey] as object),
-                    [colorKey]: color,
-                  },
-                }))
+                setDataColors((prev) => {
+                  const p = prev as unknown as DataColorsShape;
+                  return {
+                    ...p,
+                    gnss: { ...p.gnss, [k]: color },
+                  } as typeof prev;
+                })
               }
             />
-          );
-        }
-      },
-    );
+          ))}
+        </>
+      );
+    }
+
+    // ---- non-GNSS multi: use the narrowed cfgMulti
+    // return Object.entries(cfgMulti.pickers).map(([colorKey, config]) => {
+    //   if ((config as any).type === "solid") {
+    //     const current = (dataColors as any)[dataKey][colorKey] as string;
+    //     return (
+    //       <SolidColorPicker
+    //         key={colorKey}
+    //         currentColor={current}
+    //         buttonId={colorKey}
+    //         defaultColor={(config as any).default}
+    //         label={(config as any).label}
+    //         onSave={(color) =>
+    //           setDataColors((prev) => ({
+    //             ...prev,
+    //             [dataKey]: {
+    //               ...(prev as any)[dataKey],
+    //               [colorKey]: color,
+    //             },
+    //           }))
+    //         }
+    //       />
+    //     );
+    //   }
+    //   return null;
+    // });
+    return null; // no other multi configs yet
   }
 };
 

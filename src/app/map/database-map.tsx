@@ -41,6 +41,8 @@ import {
   dataVisibilityAtom,
   drawingAtom,
   rangeAtom,
+  gnssIconsVisibleAtom,
+  gnssVectorsVisibleAtom,
 } from "./atoms";
 import Basemaps from "./basemaps";
 import Controls from "./controls";
@@ -48,6 +50,9 @@ import DownloadControl from "./download-control";
 import DrawControl from "./draw-control";
 import MapLayers, { MAP_LAYER_UNITS } from "./map-layers";
 import RestartTour from "./restart-tour";
+import { useEffect } from "react";
+import { flyToAtom } from "./atoms";
+import BackTo2DControl from "./back-to-2d-contol";
 
 const drawOptionsModes: (
   | "polygon"
@@ -189,36 +194,42 @@ const PopupContent = memo(
     units?: string;
   }) => {
     if (objKey === "geometry" || !value) return null;
-    if (typeof value === "string" && value.includes("https://"))
+
+    const displayValue =
+      typeof value === "number" && objKey === "length"
+        ? value.toFixed(0)
+        : value;
+
+    if (typeof displayValue === "string" && displayValue.includes("https://"))
       return (
         <div className="text-sm text-neutral-300">
           <span className="font-semibold">{camelCaseToWords(objKey)}:</span>{" "}
           <Link
-            href={value}
+            href={displayValue}
             target="_blank"
             className="text-blue-400 hover:underline"
           >
-            {value}
+            {displayValue}
           </Link>
         </div>
       );
-    if (typeof value === "string" && value.includes("doi:"))
+    if (typeof displayValue === "string" && displayValue.includes("doi:"))
       return (
         <div className="text-sm text-neutral-300">
           <span className="font-semibold">{camelCaseToWords(objKey)}:</span>{" "}
           <Link
-            href={value.replace("doi:", "https://doi.org/")}
+            href={displayValue.replace("doi:", "https://doi.org/")}
             target="_blank"
             className="text-blue-400 hover:underline"
           >
-            {value}
+            {displayValue}
           </Link>
         </div>
       );
     return (
       <div className="text-sm text-neutral-300">
         <span className="font-semibold">{camelCaseToWords(objKey)}:</span>{" "}
-        {value}
+        {displayValue}
         {formatUnits(units)}
       </div>
     );
@@ -385,6 +396,9 @@ export default function DatabaseMap({
   const setDrawing = useSetAtom(drawingAtom);
   const ranges = useAtomValue(rangeAtom);
 
+  const showIcons = useAtomValue(gnssIconsVisibleAtom);
+  const showVectors = useAtomValue(gnssVectorsVisibleAtom);
+
   const onUpdate = useCallback(
     (features: GeoJSONStoreFeatures[] | undefined) => {
       if (!features || features.length === 0) return setDrawing(undefined);
@@ -404,6 +418,18 @@ export default function DatabaseMap({
     },
     [setDrawing],
   );
+
+  const flyToRequest = useAtomValue(flyToAtom);
+
+  useEffect(() => {
+    if (!map || !flyToRequest) return;
+    map.flyTo({
+      center: flyToRequest.center,
+      zoom: flyToRequest.zoom ?? 6,
+      duration: 900,
+      essential: true,
+    });
+  }, [map, flyToRequest]);
 
   const onHover = useCallback(
     (event: MapLayerMouseEvent) => {
@@ -792,6 +818,7 @@ export default function DatabaseMap({
       >
         <ScaleControl />
         <NavigationControl />
+        <BackTo2DControl />
         <DrawControl modes={drawOptionsModes} open onUpdate={onUpdate} />
         <TerrainControl source={"terrain"} exaggeration={1.5} />
         <DownloadControl layerIds={mapDataIds} />
@@ -811,6 +838,19 @@ export default function DatabaseMap({
             >
               {Array.isArray(val) ? (
                 val.map((layer) => {
+                  const isGnss = typedKey === "gnss";
+                  const isIconLayer =
+                    isGnss && ["Icon", "Label"].includes(layer.id);
+                  const isVectorLayer =
+                    isGnss &&
+                    ["Vector", "VectorArrow", "Uncertainty"].includes(layer.id);
+
+                  const visible =
+                    dataVisibility[typedKey] &&
+                    (!isGnss ||
+                      (isIconLayer && showIcons) ||
+                      (isVectorLayer && showVectors) ||
+                      (!isIconLayer && !isVectorLayer)); // any other GNSS sublayer
                   return (
                     <Layer
                       {...layer}
@@ -818,9 +858,7 @@ export default function DatabaseMap({
                       id={typedKey + layer.id}
                       layout={{
                         ...layer.layout,
-                        visibility: dataVisibility[typedKey]
-                          ? "visible"
-                          : "none",
+                        visibility: visible ? "visible" : "none",
                       }}
                     />
                   );

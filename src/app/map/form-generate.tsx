@@ -1,5 +1,6 @@
 "use client";
 
+import React from "react";
 import { Calendar } from "@/components/ui/calendar";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -36,6 +37,8 @@ import { useMediaQuery } from "@/lib/use-media-query";
 import { formatUnits } from "@/lib/utils";
 import { CalendarDays, Search } from "lucide-react";
 import { UseFormReturn } from "react-hook-form";
+import { useAtomValue, useSetAtom } from "jotai";
+import { dataAtom, flyToAtom } from "@/app/map/atoms";
 
 type FormGenerateProps<T extends ClientFilterDefine<GenericFilterDefine>> = {
   /** The React Hook Form instance */
@@ -68,15 +71,217 @@ type FormGenerateProps<T extends ClientFilterDefine<GenericFilterDefine>> = {
   initialData: InferFilterTypes<T>;
   /** The filters for the data type */
   filters: T;
+  /** The current dataset key */
+  dataKey: string;
 };
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function isFiniteNumber(value: number): boolean {
+  return Number.isFinite(value);
+}
+
+function parseDraft(draft: string): number | null {
+  // Allow empty / partial states while typing
+  if (draft.trim() === "") return null;
+
+  const n = Number(draft);
+  return isFiniteNumber(n) ? n : null;
+}
+
+type SingleDraftProps = {
+  minBound: number;
+  maxBound: number;
+  value: number;
+  units?: string;
+  onCommit: (next: number) => void;
+  onBlur: () => void;
+};
+
+function SingleDraftInput({
+  minBound,
+  maxBound,
+  value,
+  units,
+  onCommit,
+  onBlur,
+}: SingleDraftProps) {
+  const [draft, setDraft] = React.useState<string>(String(value));
+
+  React.useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = parseDraft(draft);
+    const raw = parsed !== null ? parsed : value;
+    const next = clamp(raw, minBound, maxBound);
+    onCommit(next);
+    setDraft(String(next));
+    onBlur();
+  };
+
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      className="h-9 w-28"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        commit();
+      }}
+      aria-label={`Value ${units ?? ""}`.trim()}
+    />
+  );
+}
+
+function RangeField({
+  filterName,
+  units,
+  valueArr,
+  minDefault,
+  maxDefault,
+  onChange,
+  onBlur,
+}: {
+  filterName: string;
+  units?: string;
+  valueArr: number[];
+  minDefault: number;
+  maxDefault: number;
+  onChange: (next: [number, number]) => void;
+  onBlur: () => void;
+}) {
+  const step = maxDefault - minDefault < 10 ? 0.1 : 1;
+
+  const clampLocal = (v: number) =>
+    Math.min(Math.max(v, minDefault), maxDefault);
+  const ordered = (a: number, b: number): [number, number] => [
+    Math.min(a, b),
+    Math.max(a, b),
+  ];
+
+  const minVal = clampLocal(valueArr[0] ?? minDefault);
+  const maxVal = clampLocal(valueArr[1] ?? maxDefault);
+
+  const [draftMin, setDraftMin] = React.useState<string>(String(minVal));
+  const [draftMax, setDraftMax] = React.useState<string>(String(maxVal));
+
+  React.useEffect(() => {
+    setDraftMin(String(minVal));
+  }, [minVal]);
+
+  React.useEffect(() => {
+    setDraftMax(String(maxVal));
+  }, [maxVal]);
+
+  const commit = () => {
+    const parseOne = (s: string, fallback: number) => {
+      const trimmed = s.trim();
+      if (trimmed === "") return fallback;
+      const n = Number(trimmed);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const nextMinRaw = parseOne(draftMin, minVal);
+    const nextMaxRaw = parseOne(draftMax, maxVal);
+
+    const next = ordered(clampLocal(nextMinRaw), clampLocal(nextMaxRaw));
+    onChange(next);
+
+    setDraftMin(String(next[0]));
+    setDraftMax(String(next[1]));
+    onBlur();
+  };
+
+  return (
+    <FormItem className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <FormLabel className="text-neutral-50">{filterName}</FormLabel>
+        <FormDescription className="space-x-2">
+          <span>
+            {Number(minVal.toFixed(1))}
+            {formatUnits(units)}
+          </span>
+          <span>–</span>
+          <span>
+            {Number(maxVal.toFixed(1))}
+            {formatUnits(units)}
+          </span>
+        </FormDescription>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Input
+          type="text"
+          inputMode="decimal"
+          value={draftMin}
+          onChange={(e) => setDraftMin(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            commit();
+          }}
+          className="h-10 flex-1 border border-neutral-700 bg-neutral-900/60 text-neutral-50 hover:bg-neutral-900"
+        />
+        <span className="text-sm text-neutral-500">–</span>
+        <Input
+          type="text"
+          inputMode="decimal"
+          value={draftMax}
+          onChange={(e) => setDraftMax(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            commit();
+          }}
+          className="h-10 flex-1 border border-neutral-700 bg-neutral-900/60 text-neutral-50 hover:bg-neutral-900"
+        />
+        {units ? (
+          <span className="pl-1 text-xs text-neutral-500">
+            {formatUnits(units)}
+          </span>
+        ) : null}
+      </div>
+
+      <FormControl>
+        <Slider
+          onValueChange={(v) => {
+            if (!Array.isArray(v) || v.length !== 2) return;
+            const next = ordered(clampLocal(v[0]), clampLocal(v[1]));
+            onChange(next);
+          }}
+          onBlur={onBlur}
+          value={[minVal, maxVal]}
+          min={minDefault}
+          max={maxDefault}
+          step={step}
+        />
+      </FormControl>
+
+      <FormMessage />
+    </FormItem>
+  );
+}
 
 /**
  * Component for automatically rendering the correct controls for each filter
  */
 export default function FormGenerate<
   T extends ClientFilterDefine<GenericFilterDefine>,
->({ form, defaults, initialData, filters }: FormGenerateProps<T>) {
+>({ form, defaults, initialData, filters, dataKey }: FormGenerateProps<T>) {
   const isLarge = useMediaQuery("(min-width:640px)");
+
+  const loaded = useAtomValue(dataAtom);
+  const setFlyTo = useSetAtom(flyToAtom);
 
   return Object.entries(filters).map(([key, filter]) => {
     return (
@@ -116,109 +321,106 @@ export default function FormGenerate<
           <FormField
             control={form.control}
             name={key}
-            render={({ field }) => (
-              <FormItem className="space-y-4">
-                <div className="flex items-center justify-between gap-2">
-                  <FormLabel className="text-neutral-50">
-                    {filter.name}
-                  </FormLabel>
-                  <FormDescription className="space-x-2">
-                    {Array.isArray(field.value) && (
-                      <>
-                        <span>
-                          {Number(field.value[0].toFixed(1))}
-                          {formatUnits(filter.units)}
-                        </span>
-                        <span>–</span>
-                        <span>
-                          {Number(field.value[1].toFixed(1))}
-                          {formatUnits(filter.units)}
-                        </span>
-                      </>
-                    )}
-                  </FormDescription>
-                </div>
-                <FormControl>
-                  <Slider
-                    onValueChange={field.onChange}
-                    onBlur={field.onBlur}
-                    name={field.name}
-                    ref={field.ref}
-                    disabled={field.disabled}
-                    value={field.value as number[]}
-                    min={
-                      defaults[key] && Array.isArray(defaults[key])
-                        ? defaults[key][0]
-                        : 0
-                    }
-                    max={
-                      defaults[key] && Array.isArray(defaults[key])
-                        ? defaults[key][1]
-                        : 0
-                    }
-                    step={
-                      defaults[key] &&
-                      Array.isArray(defaults[key]) &&
-                      defaults[key][1] - defaults[key][0] < 10
-                        ? 0.1
-                        : 1
-                    }
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
+            render={({ field }) => {
+              const valueArr = Array.isArray(field.value)
+                ? field.value
+                : [0, 0];
+
+              const minDefault =
+                defaults[key] && Array.isArray(defaults[key])
+                  ? defaults[key][0]
+                  : 0;
+              const maxDefault =
+                defaults[key] && Array.isArray(defaults[key])
+                  ? defaults[key][1]
+                  : 0;
+
+              return (
+                <RangeField
+                  filterName={filter.name}
+                  units={filter.units}
+                  valueArr={valueArr as number[]}
+                  minDefault={minDefault}
+                  maxDefault={maxDefault}
+                  onChange={(next) => field.onChange(next)}
+                  onBlur={field.onBlur}
+                />
+              );
+            }}
           />
         )}
+
         {filter.type === "greaterThan" && (
           <FormField
             control={form.control}
             name={key}
-            render={({ field }) => (
-              <FormItem className="space-y-4">
-                <div className="flex items-center justify-between gap-2">
-                  <FormLabel className="text-neutral-50">
-                    {filter.name}
-                  </FormLabel>
-                  <FormDescription className="space-x-2">
-                    {Array.isArray(field.value) && (
-                      <>
+            render={({ field }) => {
+              const valueArr = Array.isArray(field.value) ? field.value : [0];
+
+              const minDefault =
+                defaults[key] && Array.isArray(defaults[key])
+                  ? defaults[key][0]
+                  : 0;
+
+              const maxVal =
+                typeof filter.maxVal === "number" ? filter.maxVal : minDefault;
+
+              const step = maxVal - minDefault < 1 ? 0.1 : 0.5;
+
+              const current = clamp(valueArr[0], minDefault, maxVal);
+
+              const setValue = (next: number) => {
+                field.onChange([clamp(next, minDefault, maxVal)]);
+              };
+
+              return (
+                <FormItem className="space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <FormLabel className="text-neutral-50">
+                        {filter.name}
+                      </FormLabel>
+                      <FormDescription className="space-x-2">
                         {">"}
-                        {Number(field.value[0].toFixed(1))}
+                        {Number(current.toFixed(1))}
                         {formatUnits(filter.units)}
-                      </>
-                    )}
-                  </FormDescription>
-                </div>
-                <FormControl>
-                  <Slider
-                    onValueChange={field.onChange}
-                    onBlur={field.onBlur}
-                    name={field.name}
-                    ref={field.ref}
-                    disabled={field.disabled}
-                    value={field.value as number[]}
-                    min={
-                      defaults[key] && Array.isArray(defaults[key])
-                        ? defaults[key][0]
-                        : 0
-                    }
-                    max={filter.maxVal}
-                    step={
-                      defaults[key] &&
-                      filter.maxVal &&
-                      Array.isArray(defaults[key]) &&
-                      filter.maxVal - defaults[key][0] < 1
-                        ? 0.1
-                        : 0.5
-                    }
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
+                      </FormDescription>
+                    </div>
+
+                    {/* Manual entry */}
+                    <SingleDraftInput
+                      minBound={minDefault}
+                      maxBound={maxVal}
+                      value={current}
+                      units={filter.units}
+                      onCommit={(next) => setValue(next)}
+                      onBlur={field.onBlur}
+                    />
+                  </div>
+
+                  <FormControl>
+                    <Slider
+                      onValueChange={(v) => {
+                        if (Array.isArray(v) && v.length > 0) setValue(v[0]);
+                      }}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      ref={field.ref}
+                      disabled={field.disabled}
+                      value={[current]}
+                      min={minDefault}
+                      max={maxVal}
+                      step={step}
+                    />
+                  </FormControl>
+
+                  <FormMessage />
+                </FormItem>
+              );
+            }}
           />
         )}
+
         {filter.type === "date" && (
           <FormField
             control={form.control}
@@ -325,24 +527,57 @@ export default function FormGenerate<
             key={key}
             control={form.control}
             name={key}
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel className="text-neutral-50">{filter.name}</FormLabel>
-                <FormControl>
-                  <Input
-                    left={<Search />}
-                    placeholder={filter.placeholder}
-                    {...field}
-                    value={field.value as string}
-                    autoComplete="off"
-                    autoCorrect="off"
-                  />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
+            render={({ field }) => {
+              const handleKeyDown = (
+                e: React.KeyboardEvent<HTMLInputElement>,
+              ) => {
+                if (e.key !== "Enter") return;
+
+                if (dataKey !== "vlc") return;
+
+                const q = String(field.value ?? "")
+                  .trim()
+                  .toLowerCase();
+                if (!q) return;
+
+                const feats = loaded.vlc?.geojson?.features ?? [];
+                const match = feats.find((f) => {
+                  const name = String(f.properties?.name ?? "").toLowerCase();
+                  return name.includes(q);
+                });
+
+                if (!match || match.geometry.type !== "Point") return;
+
+                const [lng, lat] = match.geometry.coordinates as [
+                  number,
+                  number,
+                ];
+                setFlyTo({ center: [lng, lat], zoom: 9 });
+              };
+
+              return (
+                <FormItem>
+                  <FormLabel className="text-neutral-50">
+                    {filter.name}
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      left={<Search />}
+                      placeholder={filter.placeholder}
+                      {...field}
+                      value={field.value as string}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      onKeyDown={handleKeyDown}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              );
+            }}
           />
         )}
+
         {FILTER_STRATEGIES[filter.type].getAllowNull && (
           <FormField
             control={form.control}
